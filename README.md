@@ -1,6 +1,7 @@
 # async_track
 
 [![Build Status](https://travis-ci.org/matanlurey/async_track.svg?branch=master)](https://travis-ci.org/matanlurey/async_track)
+[![Pub](https://img.shields.io/pub/v/async_track.svg)](https://pub.dartlang.org/packages/async_track)
 
 Provides a mechanism for tracking asynchronous events in Dart.
 
