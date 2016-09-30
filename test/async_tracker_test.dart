@@ -1,78 +1,74 @@
 import 'dart:async';
 
 import 'package:async_track/async_track.dart';
-import 'package:async_track/src/cache.dart';
 import 'package:test/test.dart';
 
 void main() {
-  // Disable caching of trackers to be able to get hermetic tests.
-  enableTrackerCaching = false;
-
   List<String> logs;
 
   setUp(() => logs = <String>[]);
 
   group('$runTracked', () {
     test('should complete for a single method', () async {
-      logs.add('Start');
-      await runTracked((_) => logs.add('Execute'));
-      logs.add('End');
-      expect(logs, ['Start', 'Execute', 'End']);
+      logs.add('start');
+      await runTracked((_) => logs.add('execute'));
+      logs.add('end');
+      expect(logs, ['start', 'execute', 'end']);
     });
 
     test('should complete for multiple methods', () async {
-      logs.add('Start');
+      logs.add('start');
       await runTracked((context) {
         context.include(() {
           context.include(() {
-            logs.add('Execute');
+            logs.add('execute');
           });
         });
       });
-      logs.add('End');
-      expect(logs, ['Start', 'Execute', 'End']);
+      logs.add('end');
+      expect(logs, ['start', 'execute', 'end']);
     });
 
     test('should complete for microtasks', () async {
-      logs.add('Start');
+      logs.add('start');
       await runTracked((_) {
         scheduleMicrotask(() {
           scheduleMicrotask(() {
             scheduleMicrotask(() {
-              logs.add('Execute');
+              logs.add('execute');
             });
           });
         });
       });
-      logs.add('End');
-      expect(logs, ['Start', 'Execute', 'End']);
+      logs.add('end');
+      expect(logs, ['start', 'execute', 'end']);
     });
 
     test('should support excluding microtasks', () async {
-      logs.add('Start');
+      logs.add('start');
       await runTracked((context) {
         scheduleMicrotask(() {
           context.exclude(() {
             scheduleMicrotask(() {
               scheduleMicrotask(() {
-                logs.add('Excluded');
+                logs.add('excluded');
               });
             });
           });
           scheduleMicrotask(() {
-            logs.add('Included');
+            logs.add('included');
           });
         });
       });
-      logs.add('End');
+      logs.add('end');
       await new Future.delayed(Duration.ZERO);
-      expect(logs, ['Start', 'Included', 'End', 'Excluded']);
+      expect(logs, ['start', 'included', 'end', 'excluded']);
     });
   });
 
   group('$AsyncTracker', () {
     test('should determine the start and end of microtask loops', () async {
-      logs.add('Start');
+      logs.add('start');
       var tracker = new AsyncTracker();
       tracker.onTurnBegin.listen((_) => logs.add('--- vm turn begin ---'));
       tracker.onTurnEnd.listen((_) => logs.add('--- vm turn end ---'));
@@ -87,9 +83,9 @@ void main() {
           });
         });
       });
-      await new Future.delayed(const Duration(milliseconds: 1));
+      await new Future.delayed(const Duration(milliseconds: 100));
       expect(logs, [
-        'Start',
+        'start',
         '--- vm turn begin ---',
         'scheduleMicrotask#1',
         '--- vm turn end ---',
@@ -97,6 +93,37 @@ void main() {
         '--- event loop ---',
         'scheduleMicrotask#2',
         '--- vm turn end ---',
+      ]);
+    });
+
+    test('should track timers as well', () async {
+      logs.add('start');
+      var tracker = new AsyncTracker(timerThreshold: Duration.ZERO);
+      tracker.onTurnBegin.listen((_) => logs.add('--- vm turn begin ---'));
+      tracker.onTurnEnd.listen((_) => logs.add('--- vm turn end ---'));
+      tracker.onAsyncDone.listen((_) => logs.add('--- async done ---'));
+      tracker.runTracked(() {
+        scheduleMicrotask(() {
+          logs.add('scheduleMicrotask#1');
+          Timer.run(() {
+            logs.add('timer#1');
+            scheduleMicrotask(() {
+              logs.add('scheduleMicrotask#2');
+            });
+          });
+        });
+      });
+      await tracker.onAsyncDone.first;
+      expect(logs, [
+        'start',
+        '--- vm turn begin ---',
+        'scheduleMicrotask#1',
+        '--- vm turn end ---',
+        '--- vm turn begin ---',
+        'timer#1',
+        'scheduleMicrotask#2',
+        '--- vm turn end ---',
+        '--- async done ---'
       ]);
     });
   });

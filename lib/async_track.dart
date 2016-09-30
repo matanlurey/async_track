@@ -1,7 +1,5 @@
 import 'dart:async';
 
-import 'package:async_track/src/cache.dart';
-
 /// Returns a [Future] that completes when [action] finishes all work.
 ///
 /// The future completes with whatever value [action] returns.
@@ -18,24 +16,33 @@ import 'package:async_track/src/cache.dart';
 ///       tracker.exclude(() => _doSomeReportingWork());
 ///     });
 ///
+/// Specify a [timerThreshold] to consider scheduled [Timer]s async events:
+///     await runTracked((tracker), {
+///       _computeAsync();
+///     }, timerThreshold: const Duration(milliseconds: 50));
+///
 /// Track is considered a _simple_ use case for one-off tracking. For more
 /// complicated (continuous) tracking, see [AsyncTracker], which is meant to
 /// track asynchronous work across long periods of time/multiple actions.
-Future/*<E>*/ runTracked/*<E>*/(/*=E*/ action(TrackContext context)) async {
-  final tracker = new AsyncTracker();
+Future/*<E>*/ runTracked/*<E>*/(
+  /*=E*/ action(TrackContext context), {
+  Duration timerThreshold: const _Infinity(),
+}) async {
+  final tracker = new AsyncTracker(timerThreshold: timerThreshold);
   final context = new _AsTrackContext(tracker);
   dynamic/*=E*/ result;
   scheduleMicrotask(() {
     result = tracker.runTracked/*<E>*/(() => action(context));
   });
-  if (tracker.inTurn) {
-    // It's possible that we are using a cached AsyncTracker, because it would
-    // be expensive to keep creating them for the same Zone.current. In that
-    // case, the turn has already begun - we do not want to await a turn begin.
-    await tracker.onTurnBegin.first;
-  }
   await tracker.onTurnEnd.first;
   return result;
+}
+
+class _Infinity extends Duration {
+  const _Infinity();
+
+  @override
+  String toString() => 'Infinity';
 }
 
 /// Allows entering and exiting tracking during a top-level [runTracked] call.
@@ -90,7 +97,12 @@ abstract class TrackContext {
 /// Enables tracking an action and all subsequent actions.
 abstract class AsyncTracker {
   /// Create a new [AsyncTracker], which forks [Zone.current].
-  factory AsyncTracker() => _ZoneAsyncTracker.fork(Zone.current);
+  ///
+  /// Specify a [timerThreshold] to consider scheduled [Timer]s async events.
+  factory AsyncTracker({
+    Duration timerThreshold: const _Infinity(),
+  }) =>
+      _ZoneAsyncTracker.fork(Zone.current, timerThreshold);
 
   /// Whether [onTurnBegin] has emitted but not yet [onTurnEnd].
   bool get inTurn;
@@ -119,6 +131,13 @@ abstract class AsyncTracker {
   /// executed within the underlying tracking [Zone], and all microtasks started
   /// within the zone have completed.
   Stream<Null> get onTurnEnd;
+
+  /// Fires an event synchronously when the event loop is ended.
+  ///
+  /// This is considered to happen when [onTurnEnd]'s conditions complete _and_
+  /// there are no outstanding (non-periodic) [Timer]s scheduled to still
+  /// complete past a threshold time.
+  Stream<Null> get onAsyncDone;
 
   /// Runs [action] _within_ a [Zone] that is tracked.
   ///
@@ -149,16 +168,16 @@ class _AsTrackContext implements TrackContext {
 }
 
 class _ZoneAsyncTracker implements AsyncTracker {
-  static final _cache = new Expando<_ZoneAsyncTracker>();
-
   final Zone _zone;
 
   bool _inTurn = false;
+  StreamController<Null> _onAsyncDone;
   StreamController<Null> _onTurnBegin;
   StreamController<Null> _onTurnEnd;
 
   int _nestedCalls = 0;
   int _pendingMicrotasks = 0;
+  int _pendingTimers = 0;
 
   _ZoneAsyncTracker._afterInit(this._zone);
 
@@ -171,6 +190,9 @@ class _ZoneAsyncTracker implements AsyncTracker {
     } else if (_nestedCalls == 0 && _pendingMicrotasks == 0) {
       _onTurnEnd?.add(null);
       _inTurn = false;
+      if (_pendingTimers == 0) {
+        _onAsyncDone?.add(null);
+      }
     }
   }
 
@@ -178,11 +200,8 @@ class _ZoneAsyncTracker implements AsyncTracker {
     return new StreamController<Null>.broadcast(sync: true);
   }
 
-  static _ZoneAsyncTracker fork(Zone zone) {
-    _ZoneAsyncTracker tracker = _cache[zone];
-    if (tracker != null && enableTrackerCaching) {
-      return tracker;
-    }
+  static _ZoneAsyncTracker fork(Zone zone, Duration timerThreshold) {
+    _ZoneAsyncTracker tracker;
     tracker = new _ZoneAsyncTracker._afterInit(
       zone.fork(
         specification: new ZoneSpecification(
@@ -198,11 +217,28 @@ class _ZoneAsyncTracker implements AsyncTracker {
           scheduleMicrotask: (self, delegate, zone, fn) {
             return tracker._zoneScheduleMicrotask(self, delegate, zone, fn);
           },
+          createTimer: (self, delegate, zone, duration, fn) {
+            if (timerThreshold is _Infinity || timerThreshold < duration) {
+              return delegate.createTimer(zone, duration, fn);
+            }
+            _WrappedTimer timer;
+            tracker._zoneCreateTimer();
+            return timer = new _WrappedTimer(
+              delegate.createTimer(zone, duration, () {
+                try {
+                  fn();
+                } finally {
+                  timer.complete();
+                }
+              }),
+              tracker._zoneCompleteTimer,
+            );
+          },
         ),
         zoneValues: {zone: true},
       ),
     );
-    return _cache[zone] = tracker;
+    return tracker;
   }
 
   @override
@@ -210,6 +246,9 @@ class _ZoneAsyncTracker implements AsyncTracker {
 
   @override
   bool get isTracking => Zone.current == _zone || Zone.current[_zone] == true;
+
+  @override
+  Stream<Null> get onAsyncDone => (_onAsyncDone ??= _controller()).stream;
 
   @override
   Stream<Null> get onTurnBegin => (_onTurnBegin ??= _controller()).stream;
@@ -222,6 +261,15 @@ class _ZoneAsyncTracker implements AsyncTracker {
 
   @override
   /*=R*/ runTracked/*<R>*/(/*=R*/ action()) => _zone.run(action);
+
+  void _zoneCreateTimer() {
+    _pendingTimers++;
+  }
+
+  void _zoneCompleteTimer() {
+    _pendingTimers--;
+    _check();
+  }
 
   /*=R*/ _zoneRun/*<R>*/(_, ZoneDelegate parent, Zone zone, /*=R*/ fn()) {
     _nestedCalls++;
@@ -246,4 +294,31 @@ class _ZoneAsyncTracker implements AsyncTracker {
       }
     });
   }
+}
+
+typedef void _OnComplete();
+
+class _WrappedTimer implements Timer {
+  final _OnComplete _complete;
+  final Timer _delegate;
+
+  bool _completed = false;
+
+  _WrappedTimer(this._delegate, this._complete);
+
+  @override
+  void cancel() {
+    complete();
+    _delegate.cancel();
+  }
+
+  void complete() {
+    if (!_completed) {
+      _completed = true;
+      _complete();
+    }
+  }
+
+  @override
+  bool get isActive => _delegate.isActive;
 }

@@ -1,5 +1,5 @@
 name: async_track
-version: 0.0.1
+version: 0.1.0
 description: Track asynchronous events in Dart.
 authors:
   - Matan Lurey <matanl@google.com>
