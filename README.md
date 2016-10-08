@@ -33,7 +33,21 @@ await runTracked(() {
 ### AsyncTracker
 
 For continuous tracking, you can use `AsyncTracker`, which reports
-progress of asynchronous events continuously. See `async_track.dart`.
+progress of asynchronous events as they occur. For example you can
+be notified when a VM turn (microtask loop) begins and ends:
+
+```dart
+void main() {
+  final tracker = new AsyncTracker();
+  tracker.onTurnBegin.listen((_) {
+    print('We started a new VM turn');
+  });
+  tracker.onTurnEnd.listen((_) {
+    print('We ended a VM turn');
+  });
+  tracker.runTracked(() => startLongOperation());
+}
+```
 
 ## How it works
 
