@@ -1,11 +1,12 @@
 name: async_track
-version: 0.1.0
+version: 0.2.0
 description: Track asynchronous events in Dart.
 authors:
   - Matan Lurey <matanl@google.com>
 homepage: https://github.com/matanlurey/async_track
 dependencies:
   meta: ">=1.0.4 <2.0.0"
+  stack_trace: ">=1.7.0 <2.0.0"
 dev_dependencies:
   dart_style:
   test:
