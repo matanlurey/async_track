@@ -64,6 +64,20 @@ void main() {
       await new Future.delayed(Duration.ZERO);
       expect(logs, ['start', 'included', 'end', 'excluded']);
     });
+
+    test('should support catching exceptions', () async {
+      logs.add('start');
+      await runTracked((context) {
+        scheduleMicrotask(() {
+          throw new StateError('Intentional');
+        });
+      }, onError: (error) {
+        logs.add('error: ${error.error.runtimeType}');
+      });
+      logs.add('end');
+      await new Future.delayed(Duration.ZERO);
+      expect(logs, ['start', 'error: StateError', 'end']);
+    });
   });
 
   group('$AsyncTracker', () {
@@ -122,6 +136,38 @@ void main() {
         '--- vm turn begin ---',
         'timer#1',
         'scheduleMicrotask#2',
+        '--- vm turn end ---',
+        '--- async done ---'
+      ]);
+    });
+
+    test('should track exceptions as well', () async {
+      logs.add('start');
+      var tracker = new AsyncTracker(timerThreshold: Duration.ZERO);
+      tracker.onTurnBegin.listen((_) => logs.add('--- vm turn begin ---'));
+      tracker.onTurnEnd.listen((_) => logs.add('--- vm turn end ---'));
+      tracker.onAsyncDone.listen((_) => logs.add('--- async done ---'));
+      tracker.onError.listen((_) => logs.add('--- error ---'));
+      tracker.runTracked(() {
+        scheduleMicrotask(() {
+          logs.add('scheduleMicrotask#1');
+          Timer.run(() {
+            logs.add('timer#1');
+            scheduleMicrotask(() {
+              throw new StateError('Intentional');
+            });
+          });
+        });
+      });
+      await tracker.onAsyncDone.first;
+      expect(logs, [
+        'start',
+        '--- vm turn begin ---',
+        'scheduleMicrotask#1',
+        '--- vm turn end ---',
+        '--- vm turn begin ---',
+        'timer#1',
+        '--- error ---',
         '--- vm turn end ---',
         '--- async done ---'
       ]);

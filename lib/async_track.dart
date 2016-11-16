@@ -1,8 +1,12 @@
 import 'dart:async';
 
+import 'package:stack_trace/stack_trace.dart';
+
 /// Returns a [Future] that completes when [action] finishes all work.
 ///
 /// The future completes with whatever value [action] returns.
+///
+/// If [onError] is set then asynchronous errors are caught and forwarded.
 ///
 /// __Example use__:
 ///     var stopwatch = new Stopwatch()..start();
@@ -26,15 +30,25 @@ import 'dart:async';
 /// track asynchronous work across long periods of time/multiple actions.
 Future/*<E>*/ runTracked/*<E>*/(
   /*=E*/ action(TrackContext context), {
+  void onError(AsyncError error),
   Duration timerThreshold: const _Infinity(),
 }) async {
   final tracker = new AsyncTracker(timerThreshold: timerThreshold);
+  StreamSubscription onErrorSub;
+  if (onError != null) {
+    onErrorSub = tracker.onError.listen(onError);
+  }
   final context = new _AsTrackContext(tracker);
   dynamic/*=E*/ result;
   scheduleMicrotask(() {
-    result = tracker.runTracked/*<E>*/(() => action(context));
+    if (onError != null) {
+      result = tracker.runGuarded/*<E>*/(() => action(context));
+    } else {
+      result = tracker.runTracked/*<E>*/(() => action(context));
+    }
   });
   await tracker.onTurnEnd.first;
+  onErrorSub?.cancel();
   return result;
 }
 
@@ -94,15 +108,31 @@ abstract class TrackContext {
   bool get isTracking;
 }
 
+/// An exception that is thrown and caught in an asynchronous context.
+class AsyncError {
+  /// Original exception or error.
+  final Object error;
+
+  /// Stack trace where throw occurred.
+  final StackTrace stack;
+
+  const AsyncError._(this.error, this.stack);
+}
+
 /// Enables tracking an action and all subsequent actions.
 abstract class AsyncTracker {
   /// Create a new [AsyncTracker], which forks [Zone.current].
   ///
   /// Specify a [timerThreshold] to consider scheduled [Timer]s async events.
+  ///
+  /// If [useLongStackTraces] is `true` then generates a long asynchronous
+  /// stack trace [onError] - this makes exceptions easier to trace but has a
+  /// runtime cost of consistently throwing exceptions to catch stack location.
   factory AsyncTracker({
     Duration timerThreshold: const _Infinity(),
+    bool useLongStackTraces: false,
   }) =>
-      _ZoneAsyncTracker.fork(Zone.current, timerThreshold);
+      _ZoneAsyncTracker.fork(Zone.current, timerThreshold, useLongStackTraces);
 
   /// Whether [onTurnBegin] has emitted but not yet [onTurnEnd].
   bool get inTurn;
@@ -139,12 +169,20 @@ abstract class AsyncTracker {
   /// complete past a threshold time.
   Stream<Null> get onAsyncDone;
 
+  /// Fires an event synchronously when an error occurs.
+  Stream<AsyncError> get onError;
+
   /// Runs [action] _within_ a [Zone] that is tracked.
   ///
   /// Events like [onTurnBegin] and [onTurnEnd] will only occur on actions
   /// started as a result of running [action], and any subsequent asynchronous
   /// work that occurs.
   /*=R*/ runTracked/*<R>*/(/*=R*/ action());
+
+  /// Runs action _within_ a [Zone] that is tracked (like [runTracked]).
+  ///
+  /// Exceptions that are thrown are forwarded to [onError].
+  /*=R*/ runGuarded/*<R>*/(/*=R*/ action());
 
   /// Runs [action] _outside_ a [Zone] that is tracked.
   ///
@@ -174,6 +212,7 @@ class _ZoneAsyncTracker implements AsyncTracker {
   StreamController<Null> _onAsyncDone;
   StreamController<Null> _onTurnBegin;
   StreamController<Null> _onTurnEnd;
+  StreamController<AsyncError> _onError;
 
   int _nestedCalls = 0;
   int _pendingMicrotasks = 0;
@@ -196,15 +235,44 @@ class _ZoneAsyncTracker implements AsyncTracker {
     }
   }
 
-  static StreamController<Null> _controller() {
-    return new StreamController<Null>.broadcast(sync: true);
+  static StreamController/*<T>*/ _controller/*<T>*/() {
+    return new StreamController/*<T>*/ .broadcast(sync: true);
   }
 
-  static _ZoneAsyncTracker fork(Zone zone, Duration timerThreshold) {
+  static _ZoneAsyncTracker fork(
+    Zone zone,
+    Duration timerThreshold,
+    bool useLongStackTraces,
+  ) {
     _ZoneAsyncTracker tracker;
-    tracker = new _ZoneAsyncTracker._afterInit(
+    if (useLongStackTraces) {
+      Chain.capture(() {
+        tracker = forkInternal(zone, timerThreshold, false);
+      }, onError: (error, Chain chain) {
+        tracker._zoneError(error, chain);
+      });
+    } else {
+      tracker = forkInternal(zone, timerThreshold, true);
+    }
+    return tracker;
+  }
+
+  static _ZoneAsyncTracker forkInternal(
+    Zone zone,
+    Duration timerThreshold,
+    bool handleUncaughtExceptions,
+  ) {
+    _ZoneAsyncTracker tracker;
+    HandleUncaughtErrorHandler handleUncaughtError;
+    if (handleUncaughtExceptions) {
+      handleUncaughtError = (self, delegate, zone, error, stack) {
+        tracker._zoneError(error, stack);
+      };
+    }
+    return tracker = new _ZoneAsyncTracker._afterInit(
       zone.fork(
         specification: new ZoneSpecification(
+          handleUncaughtError: handleUncaughtError,
           run: (self, delegate, zone, fn) {
             return tracker._zoneRun(self, delegate, zone, fn);
           },
@@ -238,7 +306,6 @@ class _ZoneAsyncTracker implements AsyncTracker {
         zoneValues: {zone: true},
       ),
     );
-    return tracker;
   }
 
   @override
@@ -248,16 +315,25 @@ class _ZoneAsyncTracker implements AsyncTracker {
   bool get isTracking => Zone.current == _zone || Zone.current[_zone] == true;
 
   @override
-  Stream<Null> get onAsyncDone => (_onAsyncDone ??= _controller()).stream;
+  Stream<Null> get onAsyncDone =>
+      (_onAsyncDone ??= _controller/*<Null>*/()).stream;
 
   @override
-  Stream<Null> get onTurnBegin => (_onTurnBegin ??= _controller()).stream;
+  Stream<Null> get onTurnBegin =>
+      (_onTurnBegin ??= _controller/*<Null>*/()).stream;
 
   @override
-  Stream<Null> get onTurnEnd => (_onTurnEnd ??= _controller()).stream;
+  Stream<Null> get onTurnEnd => (_onTurnEnd ??= _controller/*<Null>*/()).stream;
+
+  @override
+  Stream<AsyncError> get onError =>
+      (_onError ??= _controller/*<AsyncError>*/()).stream;
 
   @override
   /*=R*/ runExcluded/*<R>*/(/*=R*/ action()) => _zone.parent.run(action);
+
+  @override
+  /*=R*/ runGuarded/*<R>*/(/*=R*/ action()) => _zone.runGuarded(action);
 
   @override
   /*=R*/ runTracked/*<R>*/(/*=R*/ action()) => _zone.run(action);
@@ -269,6 +345,12 @@ class _ZoneAsyncTracker implements AsyncTracker {
   void _zoneCompleteTimer() {
     _pendingTimers--;
     _check();
+  }
+
+  void _zoneError(error, StackTrace stack) {
+    if (_onError != null) {
+      _onError.add(new AsyncError._(error, stack));
+    }
   }
 
   /*=R*/ _zoneRun/*<R>*/(_, ZoneDelegate parent, Zone zone, /*=R*/ fn()) {
