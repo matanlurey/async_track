@@ -6,7 +6,7 @@ authors:
 homepage: https://github.com/matanlurey/async_track
 dependencies:
   meta: ">=1.0.4 <2.0.0"
-  stack_trace:
+  stack_trace: ">=1.7.0 <2.0.0"
 dev_dependencies:
   dart_style:
   test:
